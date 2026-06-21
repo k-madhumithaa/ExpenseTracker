@@ -5,6 +5,7 @@ import csvParser from 'csv-parser';
 import { Readable } from 'stream';
 import mongoose from 'mongoose';
 import PDFDocument from 'pdfkit';
+import moment from 'moment-timezone'; // Use moment for clean, uniform timestamp sizing
 
 // @desc    Export transactions to CSV
 // @route   GET /api/data/export
@@ -16,24 +17,24 @@ const exportTransactions = async (req, res) => {
     const query = { user: req.user._id };
 
     if (startDate && endDate) {
-      // Adjust date query to cover the entire start and end days if only date is provided
       const start = new Date(startDate);
-      start.setHours(0, 0, 0, 0); // Start of day
+      start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999); // End of day
+      end.setHours(23, 59, 59, 999);
       query.date = { $gte: start, $lte: end };
     }
 
     console.log('Fetching transactions for CSV...');
     const transactions = await Transaction.find(query)
       .populate('account', 'name')
-      .sort({ date: -1 }) // Sort by date descending for consistency
+      .sort({ date: -1 })
       .lean();
     console.log(`Fetched ${transactions.length} transactions.`);
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=transactions.csv');
 
+    // By default, fast-csv writes headers using the keys of the object passed to it.
     const csvStream = csv.format({ headers: true });
 
     csvStream.on('error', (err) => {
@@ -48,27 +49,21 @@ const exportTransactions = async (req, res) => {
     csvStream.pipe(res);
 
     console.log('Writing CSV rows...');
-    // --- Define headers explicitly for consistency ---
-    csvStream.write({
-        DateTime: 'DateTime',
-        Account: 'Account',
-        Description: 'Description',
-        Category: 'Category',
-        Type: 'Type',
-        Amount: 'Amount (INR)'
-    });
-    // ---------------------------------------------
+
     transactions.forEach(tx => {
       const accountName = tx.account?.name || 'Account Deleted';
+      
+      // Escape commas in description fields to prevent cell breakdown shifts
+      const cleanDescription = tx.description ? tx.description.replace(/,/g, ' ') : '';
+
       csvStream.write({
-        // --- UPDATED: Use toLocaleString for Date and Time ---
-        DateTime: tx.date ? new Date(tx.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : 'N/A',
-        // ----------------------------------------------------
-        Account: accountName,
-        Description: tx.description || '',
-        Category: tx.category || '',
-        Type: tx.type || '',
-        Amount: tx.amount !== undefined ? tx.amount.toFixed(2) : '0.00',
+        // --- FIX: Use a compact, universally recognized timestamp layout that prevents ### scaling ---
+        'DateTime': tx.date ? moment(tx.date).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm') : 'N/A',
+        'Account': accountName,
+        'Description': cleanDescription,
+        'Category': tx.category || 'Uncategorized',
+        'Type': tx.type || 'expense',
+        'Amount (INR)': tx.amount !== undefined ? tx.amount.toFixed(2) : '0.00',
       });
     });
 
@@ -120,36 +115,32 @@ const importTransactions = async (req, res) => {
 
     stream
       .pipe(csvParser({
-          mapHeaders: ({ header }) => header.trim() // Trim header whitespace
+          mapHeaders: ({ header }) => header.trim()
       }))
       .on('data', (row) => {
         rowCount++;
-        // Access columns case-insensitively and trim values
-        // --- UPDATED: Use DateTime if present, fallback to Date ---
-        const dateValue = (row['DateTime'] || row['Date'])?.trim();
-        // --------------------------------------------------------
+        
+        // Match the variations including space formatting hooks
+        const dateValue = (row['DateTime'] || row['Date'] || row['dateTime'])?.trim();
         const descValue = row['Description']?.trim();
-        const amountValue = row['Amount']?.trim() || row['Amount (INR)']?.trim(); // Allow for different amount headers
+        const amountValue = row['Amount']?.trim() || row['Amount (INR)']?.trim();
         const typeValue = row['Type']?.trim().toLowerCase();
         const catValue = row['Category']?.trim();
 
         const amount = parseFloat(amountValue);
 
-        // Date Parsing Logic (Handles DD-MM-YYYY and others)
         let parsedDate = null;
         if (dateValue) {
-            // Check for DD-MM-YYYY specifically
-            const ddMMyyyyParts = dateValue.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/); // Allow - or /
+            // Support both YYYY-MM-DD and locale values smoothly
+            const ddMMyyyyParts = dateValue.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
             if (ddMMyyyyParts) {
                 const year = ddMMyyyyParts[3];
                 const month = ddMMyyyyParts[2].padStart(2, '0');
                 const day = ddMMyyyyParts[1].padStart(2, '0');
-                 // Try to include time if present (e.g., DD-MM-YYYY HH:mm)
                 const timeMatch = dateValue.match(/(\d{1,2}:\d{2}(:\d{2})?)/);
-                const timeString = timeMatch ? `T${timeMatch[1]}` : 'T00:00:00'; // Default to midnight if no time
+                const timeString = timeMatch ? `T${timeMatch[1]}` : 'T00:00:00';
                 parsedDate = new Date(`${year}-${month}-${day}${timeString}`);
             } else {
-                // Try parsing directly for other formats (YYYY-MM-DD, ISO, localeString)
                 parsedDate = new Date(dateValue);
             }
         }
@@ -167,7 +158,7 @@ const importTransactions = async (req, res) => {
           });
           totalBalanceChange += (typeValue === 'income' ? amount : -amount);
         } else {
-            console.warn(`Skipping invalid row ${rowCount}: Date='${dateValue}' (Parsed as ${isValidDate ? parsedDate.toISOString() : 'Invalid'}), Desc='${descValue}', Amount='${amountValue}', Type='${typeValue}'`, row);
+            console.warn(`Skipping invalid row ${rowCount}: Date='${dateValue}'`, row);
         }
       })
       .on('end', async () => {
@@ -186,13 +177,11 @@ const importTransactions = async (req, res) => {
             res.json({ message: `Successfully imported ${transactionsToCreate.length} transactions.` });
           } else {
             await session.abortTransaction();
-            console.log('Import Aborted: No valid transactions found.');
             res.status(400).json({ message: 'No valid transactions found in CSV.' });
           }
         } catch (dbError) {
           await session.abortTransaction();
           console.error('!!! Import DB Error:', dbError);
-          console.log('Import Transaction Session Aborted due to DB error.');
           res.status(500).json({ message: 'Error saving transactions to database' });
         } finally {
           session.endSession();
@@ -201,7 +190,6 @@ const importTransactions = async (req, res) => {
       .on('error', (parseError) => {
         console.error('!!! CSV Parsing Error:', parseError);
         session.abortTransaction().finally(() => session.endSession());
-        console.log('Import Transaction Session Aborted due to parsing error.');
         if (!res.headersSent) {
              res.status(400).json({ message: 'Error parsing CSV file.' });
         }
@@ -213,7 +201,6 @@ const importTransactions = async (req, res) => {
     }
     session.endSession();
     console.error('!!! Import Controller Error:', error);
-    console.log('Import Transaction Session Aborted due to controller error.');
     if (!res.headersSent) {
       res.status(500).json({ message: 'Server Error during CSV import setup' });
     }
@@ -239,11 +226,10 @@ function generateTableRow(doc, y, c1, c2, c3, c4, c5, isHeader = false) {
 
   doc.fontSize(7.5);
 
-  // Adjusted widths for DateTime
-  doc.text(c1 || '', startX + 5, textY, { width: 70, align: 'left', lineBreak: false, baseline: 'middle' }); // Date column wider
-  doc.text(c2 || '', startX + 75, textY, { width: 150, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' }); // Description shifted
-  doc.text(c3 || '', startX + 230, textY, { width: 60, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' }); // Category shifted
-  doc.text(c4 || '', startX + 295, textY, { width: 120, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' }); // Account shifted
+  doc.text(c1 || '', startX + 5, textY, { width: 70, align: 'left', lineBreak: false, baseline: 'middle' });
+  doc.text(c2 || '', startX + 75, textY, { width: 150, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' });
+  doc.text(c3 || '', startX + 230, textY, { width: 60, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' });
+  doc.text(c4 || '', startX + 295, textY, { width: 120, align: 'left', ellipsis: true, lineBreak: false, baseline: 'middle' });
   doc.text(c5 || '', endX - 95, textY, { width: 90, align: 'right', lineBreak: false, baseline: 'middle' });
 
   doc.moveTo(startX, y + rowHeight)
@@ -264,7 +250,7 @@ const exportTransactionsPDF = async (req, res) => {
     console.log('Fetching transactions for PDF...');
     const transactions = await Transaction.find({ user: req.user._id })
       .populate('account', 'name')
-      .sort({ date: -1 }) // Sort by date descending
+      .sort({ date: -1 })
       .lean();
     console.log(`Fetched ${transactions.length} transactions.`);
 
@@ -284,17 +270,13 @@ const exportTransactionsPDF = async (req, res) => {
     doc.pipe(res);
 
     console.log('Generating PDF content...');
-    // Header
     doc.fontSize(18).font('Helvetica-Bold').fillColor('black').text('Transaction Report', { align: 'center' });
     doc.fontSize(10).font('Helvetica').fillColor('black').text(`Generated on: ${new Date().toLocaleDateString()}`, { align: 'center' });
     doc.moveDown(2);
 
-    // Table Header
     let currentY = doc.y;
     const tableTop = currentY;
-    // --- UPDATED Header Label ---
     currentY = generateTableRow(doc, tableTop, "Date & Time", "Description", "Category", "Account", "Amount", true);
-    // --------------------------
     const tableBottomMargin = 700;
 
     let totalIncome = 0;
@@ -302,16 +284,12 @@ const exportTransactionsPDF = async (req, res) => {
 
     for (const tx of transactions) {
       if (currentY > tableBottomMargin) {
-          console.log('Adding PDF page...');
           doc.addPage();
           currentY = 50;
-          // Re-add table header
           currentY = generateTableRow(doc, currentY, "Date & Time", "Description", "Category", "Account", "Amount", true);
       }
 
-      // --- UPDATED: Use toLocaleString for Date and Time ---
-      const dateTime = tx.date ? new Date(tx.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'short', timeStyle: 'short' }) : 'N/A';
-      // ----------------------------------------------------
+      const dateTime = tx.date ? moment(tx.date).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm') : 'N/A';
       const accountName = tx.account?.name || 'Account Deleted';
       const amountVal = tx.amount !== undefined ? tx.amount : 0;
       const amount = (tx.type === 'income' ? '+' : '-') + `₹${amountVal.toFixed(2)}`;
@@ -322,13 +300,10 @@ const exportTransactionsPDF = async (req, res) => {
       currentY = generateTableRow(doc, currentY, dateTime, tx.description || '', tx.category || '', accountName, amount);
     }
 
-    // Simplified Summary
     if (currentY > tableBottomMargin - 45) {
-        console.log('Adding PDF page for summary...');
         doc.addPage();
         currentY = 50;
     }
-    console.log('Adding PDF summary...');
     doc.moveDown(3);
     currentY = doc.y;
     const summaryXLabel = 400;
