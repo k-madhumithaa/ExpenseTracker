@@ -39,7 +39,7 @@ const TransactionsPage = () => {
     try {
       const { data } = await api.get('/accounts');
       setAccounts(data);
-      if (data.length > 0 && !newTxForm.account) { // Set default only if not set
+      if (data.length > 0 && !newTxForm.account) { 
         setNewTxForm(prev => ({ ...prev, account: data[0]._id }));
       }
     } catch (error) {
@@ -47,8 +47,7 @@ const TransactionsPage = () => {
     }
   };
 
- const fetchTransactions = async (reset = false) => {
-    // Only run if settings are loaded (to prevent race conditions with currency formatting)
+  const fetchTransactions = async (reset = false) => {
     if (!settings) return;
 
     try {
@@ -57,10 +56,9 @@ const TransactionsPage = () => {
       const params = new URLSearchParams({ page: currentPage, limit: 10, ...filters });
       const { data } = await api.get(`/transactions?${params.toString()}`);
 
-      // Ensure account data is present for rendering
       const transactionsWithAccount = data.transactions.map(tx => ({
           ...tx,
-          account: tx.account || { name: 'N/A' } // Provide fallback account object
+          account: tx.account || { name: 'N/A' } 
       }));
 
       if (reset) {
@@ -77,21 +75,19 @@ const TransactionsPage = () => {
     }
   };
 
-
   useEffect(() => {
-    if(settings) { // Fetch accounts only after currency settings are loaded
+    if(settings) { 
         fetchAccounts();
     }
   }, [settings]);
 
   useEffect(() => {
-    // Fetch transactions when page loads or filters change, dependent on settings
     if(settings) {
         setTransactions([]);
-        setPage(1); // Reset page on filter change
+        setPage(1); 
         fetchTransactions(true);
     }
-  }, [filters, settings]); // Add settings dependency
+  }, [filters, settings]); 
 
   const handleLoadMore = () => {
     if (page < totalPages) {
@@ -100,22 +96,16 @@ const TransactionsPage = () => {
   };
 
   useEffect(() => {
-      // Fetch next page only if page > 1 and settings are loaded
       if (page > 1 && settings) {
           fetchTransactions(false);
       }
-  }, [page, settings]); // Add settings dependency
+  }, [page, settings]); 
 
-
+  // --- FIX: Correct state handler logic to protect manual category selection ---
   const handleFormChange = (e) => {
     const { name, value } = e.target;
-
     setNewTxForm(prev => {
-      const newState = {
-        ...prev,
-        [name]: value 
-      };
-
+      const newState = { ...prev, [name]: value };
       if (name === 'type') {
         newState.category = value === 'income' ? incomeCategories[0] : expenseCategories[0];
       }
@@ -125,23 +115,16 @@ const TransactionsPage = () => {
 
   const handleFilterChange = (e) => {
       setFilters({ ...filters, [e.target.name]: e.target.value });
-      // Reset page to 1 when filters change - useEffect handles the fetch
-      // setPage(1);
   };
 
+  // --- FIX: Correct edit handler state replication matching form configurations ---
   const handleEditFormChange = (e) => {
      const { name, value } = e.target;
-
      setEditingTransaction(prev => {
-        const newState = {
-           ...prev,
-           [name]: value
-        };
-
+        const newState = { ...prev, [name]: value };
         if (name === 'type') {
            newState.category = value === 'income' ? incomeCategories[0] : expenseCategories[0];
         }
-
         return newState; 
      });
   };
@@ -151,10 +134,8 @@ const TransactionsPage = () => {
     try {
       const { data } = await api.post('/transactions', {
           ...newTxForm,
-          // Convert amount to number just before sending
           amount: Number(newTxForm.amount)
       });
-       // Manually add account info for immediate display before refetch might happen
       const accountInfo = accounts.find(a => a._id === data.account);
       setTransactions([{ ...data, account: accountInfo || { name: 'N/A' } }, ...transactions]);
       toast.success('Transaction added!');
@@ -164,9 +145,9 @@ const TransactionsPage = () => {
         amount: '',
         category: 'Uncategorized',
         type: 'expense',
-        date: formatDateTimeLocal(new Date()), // Reset date
+        date: formatDateTimeLocal(new Date()), 
       }));
-      fetchAccounts(); // Refetch accounts to show new balance
+      fetchAccounts(); 
     } catch (error) {
       toast.error(error.response?.data?.message || 'Failed to add transaction');
     }
@@ -178,7 +159,7 @@ const TransactionsPage = () => {
               await api.delete(`/transactions/${id}`);
               setTransactions(transactions.filter(tx => tx._id !== id));
               toast.success('Transaction deleted!');
-              fetchAccounts(); // Refetch accounts to show new balance
+              fetchAccounts(); 
           } catch (error) {
               toast.error('Failed to delete transaction');
           }
@@ -188,9 +169,8 @@ const TransactionsPage = () => {
   const handleEditClick = (tx) => {
       setEditingTransaction({
           ...tx,
-          // --- UPDATED: Format for datetime-local ---
           date: formatDateTimeLocal(tx.date),
-          account: tx.account?._id // Use optional chaining just in case
+          account: tx.account?._id 
       });
       setIsModalOpen(true);
   };
@@ -200,10 +180,8 @@ const TransactionsPage = () => {
       try {
            const { data } = await api.put(`/transactions/${editingTransaction._id}`, {
               ...editingTransaction,
-              // Convert amount to number just before sending
               amount: Number(editingTransaction.amount)
            });
-          // Find account name for display
           const accountInfo = accounts.find(a => a._id === data.account);
           const updatedTx = { ...data, account: accountInfo || { name: 'N/A' }};
 
@@ -212,22 +190,20 @@ const TransactionsPage = () => {
           toast.success('Transaction updated!');
           setIsModalOpen(false);
           setEditingTransaction(null);
-          fetchAccounts(); // Refetch accounts to show new balance
+          fetchAccounts(); 
       } catch (error) {
           toast.error(error.response?.data?.message || 'Failed to update transaction');
       }
   };
 
-
-    // --- 3. Function to handle image upload and OCR ---
+  // --- FIX: Integrated smart categorization upload block ---
   const handleImageUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Basic file type check
     if (!file.type.startsWith('image/')) {
         toast.error('Please upload an image file (JPG, PNG, etc.).');
-        if (fileInputRef.current) fileInputRef.current.value = ""; // Reset input
+        if (fileInputRef.current) fileInputRef.current.value = ""; 
         return;
     }
 
@@ -235,14 +211,11 @@ const TransactionsPage = () => {
     toast.loading('Uploading & Scanning bill...');
 
     const formData = new FormData();
-    formData.append('file', file); // 'file' must match upload.single('file') in backend
+    formData.append('file', file); 
 
     try {
-      // Send image to our backend endpoint
       const { data } = await api.post('/ocr/scan-receipt', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
 
       toast.dismiss();
@@ -251,18 +224,22 @@ const TransactionsPage = () => {
         toast.success('Scan complete! Check form data.');
         console.log("Parsed Data from Backend:", data);
 
-        // --- Pre-fill form with backend results ---
-        setNewTxForm(prev => ({
-          ...prev, // Keep existing category, account, type if user set them
-          description: data.description || 'Scanned Bill',
-          amount: data.amount || '',
-          // Use backend date if valid, otherwise keep existing form date
-          date: data.date ? formatDateTimeLocal(data.date) : prev.date,
-          type: 'expense', // Default to expense
-        }));
-        // ----------------------------------------
+        setNewTxForm(prev => {
+          const nextType = 'expense';
+          const isGrocery = data.description?.toLowerCase().includes('agriculture') || 
+                           data.description?.toLowerCase().includes('fruits') || 
+                           data.description?.toLowerCase().includes('vegetable');
+                           
+          return {
+            ...prev,
+            description: data.description || 'Scanned Bill',
+            amount: data.amount || '',
+            date: data.date ? formatDateTimeLocal(data.date) : prev.date,
+            type: nextType,
+            category: isGrocery ? 'Food & Groceries' : 'Shopping/Apparel', 
+          };
+        });
       } else {
-        // Handle cases where backend reported OCR failure but didn't throw 500
         toast.error(data.message || "Failed to extract data from bill.");
       }
 
@@ -272,10 +249,10 @@ const TransactionsPage = () => {
       toast.error(error.response?.data?.message || "Failed to scan bill.");
     } finally {
       setOcrLoading(false);
-      // Reset file input
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
+
   const currentCategories = newTxForm.type === 'income' ? incomeCategories : expenseCategories;
 
   if (initialLoading) return <Spinner />;
@@ -297,7 +274,7 @@ const TransactionsPage = () => {
                 <FaCamera />
                 <span>{ocrLoading ? `Scanning...` : 'Scan Bill'}</span>
               </button>
-               {ocrLoading && <div className="w-full bg-gray-200 rounded-full h-1 mt-1"><div className="bg-teal-500 h-1 rounded-full animate-pulse"></div></div>} {/* Simple pulse animation */}
+               {ocrLoading && <div className="w-full bg-gray-200 rounded-full h-1 mt-1"><div className="bg-teal-500 h-1 rounded-full animate-pulse"></div></div>} 
                <p className="text-xs text-gray-500 mt-1">Upload bill image (JPG, PNG).</p>
             </div>
 
@@ -377,7 +354,6 @@ const TransactionsPage = () => {
                 <table className="min-w-full">
                   <thead>
                     <tr className="border-b">
-                      {/* --- UPDATED Header --- */}
                       <th className="py-2 px-4 text-left">Date & Time</th>
                       <th className="py-2 px-4 text-left">Description</th>
                       <th className="py-2 px-4 text-left">Category</th>
@@ -389,7 +365,6 @@ const TransactionsPage = () => {
                   <tbody>
                     {transactions.map(tx => (
                       <tr key={tx._id} className="border-b hover:bg-gray-50">
-                        {/* --- UPDATED: Display format --- */}
                         <td className="py-2 px-4 whitespace-nowrap">{moment(tx.date).format('YYYY-MM-DD HH:mm')}</td>
                         <td className="py-2 px-4">{tx.description}</td>
                         <td className="py-2 px-4"><span className="bg-gray-200 rounded-full px-2 py-1 text-sm">{tx.category}</span></td>
