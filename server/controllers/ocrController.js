@@ -1,7 +1,8 @@
 import axios from 'axios';
 import FormData from 'form-data';
-import moment from 'moment-timezone'; // For date parsing
+import moment from 'moment-timezone'; // For accurate date parsing and timezone locking
 
+// --- Helper: Find Total Amount ---
 const findTotalAmount = (parsedText) => {
     if (!parsedText) return null;
 
@@ -9,11 +10,12 @@ const findTotalAmount = (parsedText) => {
     let potentialTotals = [];
     const totalKeywords = ['Total', 'Amount', 'NET', 'Balance', 'Paid'];
     const amountRegex = /[₹$€£]?\s?([\d,]+(?:\.\d{2})?)\b/g;
+
     for (let i = lines.length - 1; i >= 0; i--) {
         const lineText = lines[i].trim();
         let amountsOnLine = [];
         let match;
-        amountRegex.lastIndex = 0; // Reset regex
+        amountRegex.lastIndex = 0; 
 
         while ((match = amountRegex.exec(lineText)) !== null) {
             const numStr = match[1].replace(/,/g, '');
@@ -25,15 +27,15 @@ const findTotalAmount = (parsedText) => {
 
         if (amountsOnLine.length > 0) {
             const largestAmountOnLine = Math.max(...amountsOnLine);
-            let priority = 3; // Lowest priority by default
+            let priority = 3; 
 
             if (totalKeywords.some(kw => new RegExp(`\\b${kw}\\b`, 'i').test(lineText))) {
-                priority = 1; // Highest priority if keyword and amount on same line
+                priority = 1; 
                 console.log(`OCR Parse: Found amount ${largestAmountOnLine} with keyword on line ${i}`);
             }
             else if (i > 0 && totalKeywords.some(kw => new RegExp(`\\b${kw}\\b`, 'i').test(lines[i-1]))) {
-                 priority = 2; // Medium priority if keyword on line above
-                 console.log(`OCR Parse: Found amount ${largestAmountOnLine} on line ${i}, keyword likely on line ${i-1}`);
+                 priority = 2; 
+                 console.log(`OCR Parse: Found amount ${largestAmountOnLine} on line ${i}, keyword on line ${i-1}`);
             } else {
                  console.log(`OCR Parse: Found amount ${largestAmountOnLine} on line ${i} (no keyword nearby)`);
             }
@@ -49,20 +51,14 @@ const findTotalAmount = (parsedText) => {
     });
 
     console.log("OCR Parse: Selected Total:", potentialTotals[0].amount);
-    return potentialTotals[0].amount.toFixed(2); // Return the best candidate
+    return potentialTotals[0].amount.toFixed(2); 
 };
 
-
+// --- Helper: Find Date with strict Asia/Kolkata timezone mapping ---
 const findDate = (parsedText) => {
     if (!parsedText) return null;
     console.log("OCR Parse: Searching for Date/Time...");
 
-    // Regex priority:
-    // 1. DD/MM/YY HH:MM:SS (or HH:MM) - Common on simple receipts
-    // 2. DD/MM/YYYY HH:MM:SS (or HH:MM)
-    // 3. YYYY-MM-DD HH:MM:SS (or HH:MM)
-    // 4. DD-Mon-YYYY HH:MM:SS (or HH:MM)
-    // 5. Date only variants
     const dateTimeRegex = /(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*-\d{2,4})[,\s]*(\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?)?/gi;
 
     let possibleDateTimes = [];
@@ -71,7 +67,6 @@ const findDate = (parsedText) => {
     while ((dateMatch = dateTimeRegex.exec(parsedText)) !== null) {
         let dateString = dateMatch[1];
         let timeString = dateMatch[2] || ''; 
-        let combinedString = (dateString + ' ' + timeString).trim();
 
         const formatsToTry = timeString ? [
             'DD/MM/YY hh:mm:ss A', 'DD-MM-YY hh:mm:ss A',
@@ -89,7 +84,7 @@ const findDate = (parsedText) => {
             'MM/DD/YY HH:mm', 'MM-DD-YY HH:mm',
             'MM/DD/YYYY HH:mm', 'MM-DD-YYYY HH:mm',
             'YYYY-MM-DD HH:mm', 'DD-MMM-YYYY HH:mm'
-        ] : [ // Date only formats if no timeString
+        ] : [
             'DD/MM/YY', 'DD-MM-YY',
             'DD/MM/YYYY', 'DD-MM-YYYY',
             'MM/DD/YY', 'MM-DD-YY',
@@ -97,30 +92,32 @@ const findDate = (parsedText) => {
             'YYYY-MM-DD', 'DD-MMM-YYYY'
         ];
 
-        let parsed = moment(dateString + ' ' + timeString.trim(), formatsToTry, true, "Asia/Kolkata"); // Strict parsing
+        const cleanDateTimeStr = (dateString + ' ' + timeString.trim()).trim();
+        
+        // --- FIX: Strict parsing locked directly to Indian Standard Time context ---
+        let parsed = moment.tz(cleanDateTimeStr, formatsToTry, true, "Asia/Kolkata");
 
         if (parsed.isValid()) {
             if (dateString.match(/\d{2}$/) && parsed.year() > moment().year() + 1) {
-                parsed.subtract(100, 'years'); // Correct year like '25' becoming 2025 not 1925 etc.
+                parsed.subtract(100, 'years'); 
             }
-             console.log(`OCR Parse: Valid DateTime found: ${parsed.format()} from string: "${dateMatch[0]}"`);
+            console.log(`OCR Parse: Valid DateTime found: ${parsed.format()} from string: "${dateMatch[0]}"`);
             possibleDateTimes.push(parsed);
-        } else {
-             console.log(`OCR Parse: Could not parse date string: "${dateMatch[0]}"`);
         }
     }
 
     if (possibleDateTimes.length > 0) {
         possibleDateTimes.sort((a, b) => b.valueOf() - a.valueOf()); 
-        const selectedDateObject = possibleDateTimes[0].toDate();
-        console.log("OCR Parse: Selected DateTime (as Date Object):", selectedDateObject);
-        return selectedDateObject; 
+        const selectedDateISO = possibleDateTimes[0].format(); // Returns standardized layout string with local offsets preserved
+        console.log("OCR Parse: Selected DateTime (ISO String):", selectedDateISO);
+        return selectedDateISO; 
     }
 
-     console.log("OCR Parse: No valid date/time found.");
+    console.log("OCR Parse: No valid date/time found.");
     return null; 
 };
 
+// --- Helper: Find Vendor with Multi-Line Location fallback matching ---
 const findVendor = (parsedText) => {
      if (!parsedText) return null;
      console.log("OCR Parse: Searching for Vendor...");
@@ -131,52 +128,51 @@ const findVendor = (parsedText) => {
      if (lines.length === 0) return null;
 
      let potentialVendors = [];
-     const maxLinesToCheck = Math.min(lines.length, 5); // Focus on top lines
+     const maxLinesToCheck = Math.min(lines.length, 5); 
      const stopKeywords = ['bill', 'invoice', 'receipt', 'date', 'time', 'gstin', 'phone', 'ph:', 'address', 'customer', 'cashier', 'order', 'table', 'item', 'qty', 'rate', 'amount', 'total', 'tax'];
 
      for (let i = 0; i < maxLinesToCheck; i++) {
         const line = lines[i];
 
         if (stopKeywords.some(kw => new RegExp(`\\b${kw}\\b`, 'i').test(line))) {
-             console.log(`OCR Parse: Stopping vendor search at line ${i} due to keyword: "${line}"`);
+            console.log(`OCR Parse: Stopping vendor search at line ${i} due to keyword filter.`);
             break;
         }
 
-        if (line.length < 3 || line.length > 60) continue; // Skip very short/long lines
-        if (!line.match(/[a-zA-Z]/)) continue; // Skip lines with no letters
-        if (line.match(/^\d+[-/\s]+\d+[-/\s]+\d+/)) continue; // Skip lines starting like dates
-        if (line.match(/^\d{1,2}:\d{2}/)) continue; // Skip lines starting like times
-        if (line.match(/\d{6,}/) && !line.match(/[a-zA-Z]{3,}/)) continue; // Skip lines that are mostly long numbers (GSTIN, Phone?) unless they also have significant text
+        if (line.length < 3 || line.length > 60) continue; 
+        if (!line.match(/[a-zA-Z]/)) continue; 
+        if (line.match(/^\d+[-/\s]+\d+[-/\s]+\d+/)) continue; 
+        if (line.match(/^\d{1,2}:\d{2}/)) continue; 
+        if (line.match(/\d{6,}/) && !line.match(/[a-zA-Z]{3,}/)) continue; 
 
-         console.log(`OCR Parse: Potential vendor line ${i}: "${line}"`);
         potentialVendors.push(line);
      }
 
      if (potentialVendors.length > 0) {
+         // --- FIX: Multi-line structural extraction matching ---
          let vendorName = potentialVendors[0];
-          if (potentialVendors.length > 1 && potentialVendors[1].length < 30 && !potentialVendors[1].match(/^\d/)) {
-              if (!potentialVendors[1].match(/^(?:no|#|plot|apt|near)/i)) {
-                   vendorName += ` ${potentialVendors[1]}`;
-              }
-          }
-          let allCapsVendor = potentialVendors.find(v => v === v.toUpperCase() && v.length > 3 && !v.match(/^\d+$/));
-          if (allCapsVendor) {
-              vendorName = allCapsVendor; // Prefer ALL CAPS if found
-          }
+         const standaloneLocations = ['BANGALORE', 'BENGALURU', 'MUMBAI', 'DELHI', 'CHENNAI'];
+         
+         if (standaloneLocations.includes(vendorName.toUpperCase()) && potentialVendors.length > 1) {
+             vendorName = `${vendorName} - ${potentialVendors[1]}`;
+         } else if (potentialVendors.length > 1 && potentialVendors[1].length < 40 && !potentialVendors[1].match(/^\d/)) {
+             if (!potentialVendors[1].match(/^(?:no|#|plot|apt|near|phone|tel)/i)) {
+                  vendorName += ` ${potentialVendors[1]}`;
+             }
+         }
 
-         vendorName = vendorName.substring(0, 100); // Limit length
+         vendorName = vendorName.substring(0, 100); 
          console.log("OCR Parse: Selected Vendor:", vendorName);
          return vendorName;
      }
 
-     console.log("OCR Parse: No suitable vendor name found, using first line as fallback.");
      return lines[0].substring(0, 100);
 };
 
-
+// --- Main Route Handler ---
 // @desc    Scan a receipt image using OCR.space
 // @route   POST /api/ocr/scan-receipt
-// @access  Private (Needs auth middleware)
+// @access  Private
 const scanReceipt = async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ message: 'No receipt image uploaded.' });
@@ -191,16 +187,13 @@ const scanReceipt = async (req, res) => {
     try {
         const form = new FormData();
         form.append('apikey', process.env.OCR_SPACE_API_KEY);
-        form.append('language', 'eng'); // Or other languages if needed
+        form.append('language', 'eng'); 
         form.append('isOverlayRequired', 'false');
         form.append('detectOrientation', 'true');
         form.append('scale', 'true');
-        // --- Enable Receipt Scanning Engine ---
-        form.append('isTable', 'true'); // Helpful for structure
-        form.append('OCREngine', '2'); // Engine 2 often better for receipts
-        // form.append('receiptScanning', 'true'); // Use if available/needed on specific plans
+        form.append('isTable', 'true'); 
+        form.append('OCREngine', '2'); 
 
-        // Append the file buffer
         form.append('file', req.file.buffer, { filename: req.file.originalname });
 
         console.log("Sending request to OCR.space...");
@@ -209,7 +202,6 @@ const scanReceipt = async (req, res) => {
         });
 
         console.log("OCR.space Response Status:", response.status);
-        // console.log("OCR.space Response Data:", response.data); // Log full response if needed
 
         if (response.data?.OCRExitCode === 1 && response.data.ParsedResults?.length > 0) {
             const parsedText = response.data.ParsedResults[0].ParsedText;
@@ -217,38 +209,22 @@ const scanReceipt = async (req, res) => {
             console.log(parsedText);
             console.log("-----------------------");
 
-            // --- Extract Data ---
             const totalAmount = findTotalAmount(parsedText);
             const transactionDate = findDate(parsedText);
             const vendor = findVendor(parsedText);
-            // ------------------
 
             res.json({
                 success: true,
                 amount: totalAmount,
-                date: transactionDate, // Send as ISO string or timestamp
-                description: vendor || 'Scanned Bill', // Use default if vendor not found
+                date: transactionDate, 
+                description: vendor || 'Scanned Bill', 
             });
         } else {
             console.error("OCR.space Error:", response.data?.ErrorMessage?.join(', '));
             throw new Error(response.data?.ErrorMessage?.join(', ') || 'OCR parsing failed.');
         }
     } catch (error) {
-        // --- ADD MORE LOGGING ---
-        console.error('!!! Error calling OCR.space API !!!');
-        if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
-            console.error('OCR.space Response Status:', error.response.status);
-            console.error('OCR.space Response Headers:', error.response.headers);
-            console.error('OCR.space Response Data:', error.response.data);
-        } else if (error.request) {
-            console.error('OCR.space No Response Received:', error.request);
-        } else {
-            console.error('OCR.space Request Setup Error:', error.message);
-        }
-        console.error('Axios Error Config:', error.config); // Log the request config
-        // --- END ADD MORE LOGGING ---
+        console.error('!!! Error calling OCR.space API !!!', error.message);
         res.status(500).json({ message: 'Failed to process receipt image.' });
     }
 };
