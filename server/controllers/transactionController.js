@@ -15,7 +15,7 @@ const addTransaction = async (req, res) => {
       await session.abortTransaction();
       return res.status(404).json({ message: 'Account not found or not authorized' });
     }
-
+    const correctDate = moment.tz(date, "Asia/Kolkata").toDate();
     const transaction = new Transaction({
       user: req.user._id,
       account: accountId,
@@ -23,7 +23,7 @@ const addTransaction = async (req, res) => {
       amount: Number(amount), // Ensure amount is a number
       type,
       category,
-      date: new Date(date),
+      date: correctDate,
     });
     
     // Update account balance
@@ -137,7 +137,7 @@ const updateTransaction = async (req, res) => {
     transaction.amount = newAmount || transaction.amount;
     transaction.type = type || transaction.type;
     transaction.category = category || transaction.category;
-    transaction.date = date ? new Date(date) : transaction.date;
+    transaction.date = date ? moment.tz(date, "Asia/Kolkata").toDate() : transaction.date;
     transaction.account = accountId || transaction.account;
     
     const updatedTransaction = await transaction.save({ session });
