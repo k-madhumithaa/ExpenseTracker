@@ -87,7 +87,7 @@ const deleteRecurringTransaction = async (req, res) => {
 };
 
 
-// @desc    Process any due recurring transactions (v5 - Simplified Logic)
+// @desc    Process any due recurring transactions (With Multi-Month Catch-Up Loop)
 // @route   POST /api/recurring/process
 // @access  Private
 const processRecurringTransactions = async (req, res) => {
@@ -112,15 +112,22 @@ const processRecurringTransactions = async (req, res) => {
 
         // Process each schedule individually
         for (const tx of recurringTxs) {
-            // Calculate the single NEXT due date based on current state
-            const lastRan = tx.lastProcessedDate ? moment(tx.lastProcessedDate) : moment(tx.startDate);
-            const nextDueDate = lastRan.clone().add(1, tx.frequency);
+            let scheduleCaughtUp = false;
 
-            // Check if this single next due date is in the past or today
-            if (nextDueDate.isSameOrBefore(now, 'day')) {
+            // --- FIX: Use a WHILE loop to catch up on ALL missed dates ---
+            while (!scheduleCaughtUp) {
+                // Re-fetch current state or use updated execution baseline
+                const lastRan = tx.lastProcessedDate ? moment(tx.lastProcessedDate) : moment(tx.startDate);
+                const nextDueDate = lastRan.clone().add(1, tx.frequency);
+
+                // If next due date is in the future, this specific schedule is fully caught up!
+                if (nextDueDate.isAfter(now, 'day')) {
+                    scheduleCaughtUp = true;
+                    break; 
+                }
+
                 console.log(`[User: ${userId}] Schedule '${tx.description}' needs processing for ${nextDueDate.format('YYYY-MM-DD')}.`);
 
-                // --- Attempt to process this single due date ---
                 let transactionCommitted = false;
                 let retries = 3;
 
@@ -128,33 +135,38 @@ const processRecurringTransactions = async (req, res) => {
                     const session = await mongoose.startSession();
                     session.startTransaction();
                     try {
-                        // Re-fetch docs inside transaction for latest state
                         const account = await Account.findById(tx.account).session(session);
                         const currentTxDocInDB = await RecurringTransaction.findById(tx._id).session(session);
 
-                        // Pre-checks
                         if (!currentTxDocInDB) {
                            console.warn(` -> Schedule ${tx._id} deleted during processing. Aborting.`);
-                           await session.abortTransaction(); break; // Exit retry loop
+                           await session.abortTransaction(); 
+                           scheduleCaughtUp = true; // Stop while loop
+                           break; 
                         }
                         if (!account) {
                            console.warn(` -> Account ${tx.account} not found. Aborting.`);
-                           await session.abortTransaction(); break; // Exit retry loop
+                           await session.abortTransaction(); 
+                           scheduleCaughtUp = true; // Stop while loop
+                           break; 
                         }
-                        // Check if already processed (most critical check)
                         if (currentTxDocInDB.lastProcessedDate && moment(currentTxDocInDB.lastProcessedDate).isSameOrAfter(nextDueDate, 'day')) {
-                            console.log(` -> Date ${nextDueDate.format('YYYY-MM-DD')} already processed in DB. Skipping transaction.`);
-                            await session.abortTransaction(); // No changes needed
-                            transactionCommitted = true; // Mark as handled to exit retry loop
-                            break; // Exit retry loop
+                            console.log(` -> Date ${nextDueDate.format('YYYY-MM-DD')} already processed in DB.`);
+                            await session.abortTransaction();
+                            transactionCommitted = true;
+                            break;
                         }
 
-                        // Create Transaction for this due date
-                        console.log(` -> Creating transaction for ${nextDueDate.format('YYYY-MM-DD')}`);
+                        // Create Transaction for this specific missed date
                         const newTransaction = new Transaction({
-                             user: tx.user, account: tx.account, description: tx.description,
-                             amount: tx.amount, type: tx.type, category: tx.category,
-                             date: nextDueDate.toDate(), recurringSource: tx._id
+                             user: tx.user, 
+                             account: tx.account, 
+                             description: tx.description,
+                             amount: tx.amount, 
+                             type: tx.type, 
+                             category: tx.category,
+                             date: nextDueDate.toDate(), 
+                             recurringSource: tx._id
                          });
                         await newTransaction.save({ session });
 
@@ -163,63 +175,51 @@ const processRecurringTransactions = async (req, res) => {
                         account.balance += change;
                         await account.save({ session });
 
-                        // Update Recurring Doc's lastProcessedDate to this due date
+                        // Update local object property so the parent while loop accurately calculates the NEXT loop step
+                        tx.lastProcessedDate = nextDueDate.toDate(); 
+
                         currentTxDocInDB.lastProcessedDate = nextDueDate.toDate();
                         await currentTxDocInDB.save({ session });
 
-                        // Commit
                         await session.commitTransaction();
-                        console.log(` -> Successfully processed ${nextDueDate.format('YYYY-MM-DD')}`);
-                        transactionCommitted = true; // Mark retry loop success
                         globalProcessedCount++;
+                        transactionCommitted = true; 
 
                     } catch (error) {
                         await session.abortTransaction();
-                        console.error(` -> Transaction Error (Attempt ${4 - retries}) for ${nextDueDate.format('YYYY-MM-DD')}:`, error.codeName === 'WriteConflict' ? 'WriteConflict' : error.message);
                         if (error.errorLabels?.includes('TransientTransactionError') || error.codeName === 'WriteConflict') {
                             retries--;
                             if (retries > 0) {
-                                console.log(` -> Retrying... (${retries} left)`);
-                                await new Promise(resolve => setTimeout(resolve, Math.random() * 100 + 150)); // Slightly longer delay
+                                await new Promise(resolve => setTimeout(resolve, Math.random() * 100 + 150));
                             } else {
-                                 console.error(` -> Max retries reached for due date ${nextDueDate.format('YYYY-MM-DD')}.`);
-                                 errorsOccurred = true; // Mark failure for this schedule
+                                 errorsOccurred = true;
+                                 scheduleCaughtUp = true; // Break loop on system failure
                             }
-                        } else { // Non-retryable error
-                            console.error(' -> Non-retryable error occurred. Stopping processing for this schedule.');
-                            retries = 0; // Stop retrying
-                            errorsOccurred = true; // Mark failure for this schedule
+                        } else {
+                            retries = 0;
+                            errorsOccurred = true;
+                            scheduleCaughtUp = true; // Break loop on hard failure
                         }
                     } finally {
                         session.endSession();
                     }
-                } // End retry while loop
+                } // End retry loop
 
-                // If processing this date failed after retries, we stop trying for this schedule FOR THIS RUN
-                // It will be picked up again the next time processRecurringTransactions is called.
+                // Break outer while loop if transaction execution context fails out completely
                 if (!transactionCommitted) {
-                     console.error(`[User: ${userId}] Failed to process ${nextDueDate.format('YYYY-MM-DD')} for '${tx.description}' after retries.`);
-                     // No 'break' here - let the outer 'for' loop continue to the next schedule
+                    break;
                 }
+            } // End catch-up while loop for single item
+        } // End for loop for all items
 
-            } else {
-                // Next due date is in the future, nothing to do for this schedule right now
-                // console.log(`[User: ${userId}] Schedule '${tx.description}' is up to date. Next due: ${nextDueDate.format('YYYY-MM-DD')}`);
-            }
-        } // End for loop (each recurring tx)
-
-        console.log(`[User: ${userId}] Finished recurring processing check. Total processed this run: ${globalProcessedCount}`);
+        console.log(`[User: ${userId}] Finished recurring check. Total processed: ${globalProcessedCount}`);
         res.json({ message: `Processed ${globalProcessedCount} recurring transactions this run.` });
 
     } catch (error) {
-        // Error fetching initial schedules or other unexpected error
-        console.error(`!!! [User: ${userId}] Global Recurring Processing Error:`, error);
-        errorsOccurred = true;
-        res.status(500).json({ message: 'Server error during recurring processing setup.' });
+        console.error(`!!! Global Processing Error:`, error);
+        res.status(500).json({ message: 'Server error during execution.' });
     } finally {
-        // Release Lock
         processingUsers.delete(userId);
-        console.log(`Released lock for user ${userId}. Errors occurred during run: ${errorsOccurred}`);
     }
 };
 
