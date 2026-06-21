@@ -1,6 +1,7 @@
 import Transaction from '../models/Transaction.js';
 import Account from '../models/Account.js';
 import mongoose from 'mongoose';
+import moment from 'moment-timezone';
 
 // @desc    Add a new transaction
 // @route   POST /api/transactions
@@ -16,11 +17,12 @@ const addTransaction = async (req, res) => {
       return res.status(404).json({ message: 'Account not found or not authorized' });
     }
     const correctDate = moment.tz(date, "Asia/Kolkata").toDate();
+
     const transaction = new Transaction({
       user: req.user._id,
       account: accountId,
       description,
-      amount: Number(amount), // Ensure amount is a number
+      amount: Number(amount),
       type,
       category,
       date: correctDate,
@@ -40,7 +42,7 @@ const addTransaction = async (req, res) => {
     res.status(201).json(createdTransaction);
   } catch (error) {
     await session.abortTransaction();
-    console.error(error);
+    console.error("Add Transaction Error:", error);
     res.status(500).json({ message: 'Server Error' });
   } finally {
     session.endSession();
@@ -55,7 +57,6 @@ const getTransactions = async (req, res) => {
   try {
     const query = { user: req.user._id };
     
-    // Filtering logic
     if (description) {
       query.description = { $regex: description, $options: 'i' };
     }
@@ -67,7 +68,7 @@ const getTransactions = async (req, res) => {
     }
 
     const transactions = await Transaction.find(query)
-      .populate('account', 'name type') // 'populate' shows account details
+      .populate('account', 'name type')
       .sort({ date: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -108,9 +109,6 @@ const updateTransaction = async (req, res) => {
       return res.status(404).json({ message: 'Account not found' });
     }
 
-    // --- Critical Logic: Revert old balance and apply new one ---
-
-    // 1. Revert the original transaction from the original account
     if (transaction.type === 'income') {
       originalAccount.balance -= transaction.amount;
     } else {
@@ -118,7 +116,6 @@ const updateTransaction = async (req, res) => {
     }
     await originalAccount.save({ session });
 
-    // 2. Apply the new transaction to the new (or same) account
     const newAmount = Number(amount);
     if (type === 'income') {
       newAccount.balance += newAmount;
@@ -126,13 +123,10 @@ const updateTransaction = async (req, res) => {
       newAccount.balance -= newAmount;
     }
     
-    // If the account changed, we must save the new account.
-    // If it's the same account, it will be saved correctly.
     if (originalAccount._id.toString() !== newAccount._id.toString()) {
       await newAccount.save({ session });
     }
 
-    // 3. Update the transaction itself
     transaction.description = description || transaction.description;
     transaction.amount = newAmount || transaction.amount;
     transaction.type = type || transaction.type;
@@ -147,7 +141,7 @@ const updateTransaction = async (req, res) => {
 
   } catch (error) {
     await session.abortTransaction();
-    console.error(error);
+    console.error("Update Transaction Error:", error);
     res.status(500).json({ message: 'Server Error' });
   } finally {
     session.endSession();
@@ -170,10 +164,9 @@ const deleteTransaction = async (req, res) => {
 
     const account = await Account.findById(transaction.account).session(session);
     if (account) {
-      // Revert the balance change from the associated account
       if (transaction.type === 'income') {
         account.balance -= transaction.amount;
-      } else { // 'expense'
+      } else {
         account.balance += transaction.amount;
       }
       await account.save({ session });
@@ -186,15 +179,13 @@ const deleteTransaction = async (req, res) => {
 
   } catch (error) {
     await session.abortTransaction();
-    console.error(error);
+    console.error("Delete Transaction Error:", error);
     res.status(500).json({ message: 'Server Error' });
   } finally {
     session.endSession();
   }
 };
 
-
-// Make sure to export all functions!
 export {
   addTransaction,
   getTransactions,
