@@ -35,7 +35,6 @@ A full-stack personal finance management application that helps users track expe
 - MongoDB
 
 ---
-Screenshots
 
 ## 📸 Screenshots
 
